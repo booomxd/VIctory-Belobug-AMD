@@ -11,5 +11,8 @@ publish.workspace = true
 object.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+victory-core.workspace = true
+
 [lints]
 workspace = true

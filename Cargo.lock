@@ -725,6 +725,7 @@ version = "0.1.0"
 dependencies = [
  "object",
  "thiserror",
+ "victory-core",
 ]
 
 [[package]]
@@ -743,6 +744,7 @@ name = "victory-shader"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+ "victory-core",
  "windows",
  "windows-sys",
  "zlib-rs",

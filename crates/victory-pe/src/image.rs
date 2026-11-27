@@ -692,4 +692,184 @@ mod tests {
             ]
         );
     }
+
+    /// A PE32+ image that carries one of everything [`ImageInfo::parse`]
+    /// reads: imports (by name and by ordinal), delay imports, an export,
+    /// TLS callbacks and a CodeView record, all in one section at RVA
+    /// 0x1000. Built here, so no real binary is needed: the seed of the
+    /// fuzz test below.
+    fn rich_image() -> Vec<u8> {
+        const BASE: u64 = 0x1_4000_0000;
+        let mut d = vec![0u8; 0x600];
+        let put16 =
+            |d: &mut Vec<u8>, at: usize, v: u16| d[at..at + 2].copy_from_slice(&v.to_le_bytes());
+        let put32 =
+            |d: &mut Vec<u8>, at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        let put64 =
+            |d: &mut Vec<u8>, at: usize, v: u64| d[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        d[0..2].copy_from_slice(b"MZ");
+        put32(&mut d, 0x3C, 0x40);
+        d[0x40..0x44].copy_from_slice(b"PE\0\0");
+        put16(&mut d, 0x44, MACHINE_AMD64);
+        put16(&mut d, 0x46, 1); // sections
+        put16(&mut d, 0x54, 240); // optional header size
+        put16(&mut d, 0x56, 0x0022); // executable, large address aware
+        let opt = 0x58;
+        put16(&mut d, opt, 0x20B);
+        put32(&mut d, opt + 16, 0x1300); // entry point
+        put64(&mut d, opt + 24, BASE);
+        put32(&mut d, opt + 32, 0x1000);
+        put32(&mut d, opt + 36, 0x200);
+        put32(&mut d, opt + 56, 0x2000); // size of image
+        put32(&mut d, opt + 60, 0x200); // size of headers
+        put16(&mut d, opt + 68, 2); // Windows GUI
+        put32(&mut d, opt + 108, 16);
+        let dir = |d: &mut Vec<u8>, index: usize, rva: u32, size: u32| {
+            put32(d, opt + 112 + 8 * index, rva);
+            put32(d, opt + 116 + 8 * index, size);
+        };
+        dir(&mut d, 0, 0x1180, 0x80); // exports, their tables inside
+        dir(&mut d, 1, 0x1000, 0x28); // imports
+        dir(&mut d, 6, 0x1200, 28); // debug
+        dir(&mut d, 9, 0x1100, 0x28); // TLS
+        dir(&mut d, 13, 0x1280, 0x40); // delay imports
+        let sec = opt + 240;
+        d[sec..sec + 5].copy_from_slice(b".data");
+        put32(&mut d, sec + 8, 0x400); // virtual size
+        put32(&mut d, sec + 12, 0x1000);
+        put32(&mut d, sec + 16, 0x400); // raw size
+        put32(&mut d, sec + 20, 0x200); // raw offset
+        put32(&mut d, sec + 36, 0xC000_0040); // initialized data, read, write
+        let at = |rva: u32| 0x200 + (rva - 0x1000) as usize;
+        // Imports: k.dll!Fn (hint 1) and k.dll!#5.
+        put32(&mut d, at(0x1000), 0x1060); // name table
+        put32(&mut d, at(0x100C), 0x1040); // DLL name
+        put32(&mut d, at(0x1010), 0x1080); // address table
+        d[at(0x1040)..at(0x1046)].copy_from_slice(b"k.dll\0");
+        for table in [0x1060, 0x1080] {
+            put64(&mut d, at(table), 0x10C0);
+            put64(&mut d, at(table + 8), 0x8000_0000_0000_0005);
+        }
+        put16(&mut d, at(0x10C0), 1);
+        d[at(0x10C2)..at(0x10C5)].copy_from_slice(b"Fn\0");
+        // TLS: one callback at RVA 0x1380.
+        put64(
+            &mut d,
+            at(0x1100) + layout::TLS64_ADDRESS_OF_CALLBACKS,
+            BASE + 0x1140,
+        );
+        put64(&mut d, at(0x1140), BASE + 0x1380);
+        // Exports: t.dll!alpha at RVA 0x1300, ordinal 1.
+        put32(&mut d, at(0x1180) + 12, 0x11F0);
+        put32(&mut d, at(0x1180) + 16, 1);
+        put32(&mut d, at(0x1180) + 20, 1);
+        put32(&mut d, at(0x1180) + 24, 1);
+        put32(&mut d, at(0x1180) + 28, 0x11C0);
+        put32(&mut d, at(0x1180) + 32, 0x11C8);
+        put32(&mut d, at(0x1180) + 36, 0x11D0);
+        put32(&mut d, at(0x11C0), 0x1300);
+        put32(&mut d, at(0x11C8), 0x11E0);
+        d[at(0x11E0)..at(0x11E6)].copy_from_slice(b"alpha\0");
+        d[at(0x11F0)..at(0x11F6)].copy_from_slice(b"t.dll\0");
+        // Debug: one CodeView (RSDS) record naming a.pdb.
+        put32(&mut d, at(0x1200) + 12, 2);
+        put32(&mut d, at(0x1200) + 16, 30);
+        put32(&mut d, at(0x1200) + 20, 0x1240);
+        put32(&mut d, at(0x1200) + 24, at(0x1240) as u32);
+        d[at(0x1240)..at(0x1244)].copy_from_slice(b"RSDS");
+        d[at(0x1244)..at(0x1254)].copy_from_slice(&[0x11; 16]);
+        put32(&mut d, at(0x1254), 3);
+        d[at(0x1258)..at(0x125E)].copy_from_slice(b"a.pdb\0");
+        // Delay imports: k.dll!Fn again.
+        put32(&mut d, at(0x1280), 1); // RVA-based
+        put32(&mut d, at(0x1284), 0x1040);
+        put32(&mut d, at(0x1288), 0x1320); // module handle
+        put32(&mut d, at(0x128C), 0x12E0); // address table
+        put32(&mut d, at(0x1290), 0x12C0); // name table
+        put64(&mut d, at(0x12C0), 0x10C0);
+        d
+    }
+
+    #[test]
+    fn the_rich_image_parses_whole() {
+        let info = ImageInfo::parse(&rich_image()).unwrap();
+        assert_eq!(info.entry_rva, 0x1300);
+        let symbols: Vec<_> = info.imports[0]
+            .entries
+            .iter()
+            .map(|e| e.symbol.to_string())
+            .collect();
+        assert_eq!(info.imports[0].dll, "k.dll");
+        assert_eq!(symbols, ["Fn", "#5"]);
+        assert_eq!(info.imports[0].entries[1].iat_slot_rva, 0x1088);
+        assert_eq!(info.delay_imports[0].entries[0].iat_slot_rva, 0x12E0);
+        assert_eq!(info.exports[0].name.as_deref(), Some("alpha"));
+        assert_eq!(info.exports[0].rva, Some(0x1300));
+        assert_eq!(info.tls.as_ref().unwrap().callback_rvas, [0x1380]);
+        let cv = info.codeview.as_ref().unwrap();
+        assert_eq!((cv.pdb_path.as_str(), cv.age), ("a.pdb", 3));
+    }
+
+    /// Offsets of the fields the parser trusts least: the header's counts
+    /// and sizes, the data directories, the section header and every
+    /// pointer of the tables inside the section.
+    fn rich_image_fields() -> Vec<usize> {
+        let opt = 0x58;
+        let mut f = vec![0x3C, 0x46, 0x54, 0x56, opt, opt + 16, opt + 24, opt + 28];
+        f.extend([opt + 32, opt + 36, opt + 56, opt + 60, opt + 108]);
+        f.extend((opt + 112..opt + 240).step_by(4));
+        f.extend((opt + 240 + 8..opt + 240 + 40).step_by(4));
+        let at = |rva: usize| 0x200 + rva - 0x1000;
+        for table in [0x1000, 0x1100, 0x1180, 0x1200, 0x1280] {
+            f.extend((at(table)..at(table) + 40).step_by(4));
+        }
+        f.extend([
+            at(0x1060),
+            at(0x1068),
+            at(0x1080),
+            at(0x1140),
+            at(0x11C0),
+            at(0x11C8),
+        ]);
+        f.extend([at(0x11D0), at(0x1254), at(0x12C0)]);
+        f
+    }
+
+    /// Damaged images are refused or read within their bounds; they never
+    /// panic. What an accepted image reports must agree with its bytes.
+    #[test]
+    fn damaged_images_never_panic() {
+        let seeds = vec![rich_image()];
+        victory_core::fuzz::run("pe image", 0x5045, &seeds, &rich_image_fields(), |data| {
+            let Ok(info) = ImageInfo::parse(data) else {
+                return;
+            };
+            for s in &info.sections {
+                if s.file_size != 0 {
+                    assert!(u64::from(s.file_offset) + u64::from(s.file_size) <= data.len() as u64);
+                }
+            }
+            let mut rvas = vec![info.entry_rva];
+            for m in info.imports.iter().chain(&info.delay_imports) {
+                for e in &m.entries {
+                    assert!(u64::from(e.iat_slot_rva) + 8 <= u64::from(info.size_of_image));
+                    rvas.push(e.iat_slot_rva);
+                }
+            }
+            if let Some(tls) = &info.tls {
+                rvas.push(tls.directory_rva);
+                rvas.extend(&tls.callback_rvas);
+            }
+            rvas.extend(info.exports.iter().filter_map(|e| e.rva));
+            for rva in rvas {
+                if let Some(off) = info.rva_to_file_offset(rva) {
+                    assert!((off as usize) < data.len(), "RVA {rva:#x} maps to {off:#x}");
+                }
+            }
+            let _ = (info.is_dll(), info.subsystem_name(), info.import_count());
+            if let Some(cv) = &info.codeview {
+                let _ = cv.symbol_key();
+            }
+        });
+    }
 }
