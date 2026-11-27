@@ -40,5 +40,8 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Dxgi_Common",
 ] }
 
+[dev-dependencies]
+victory-core.workspace = true
+
 [lints]
 workspace = true

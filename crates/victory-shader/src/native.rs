@@ -1271,4 +1271,43 @@ mod tests {
         *bad_adler.last_mut().unwrap() ^= 1;
         assert!(unpack(&bad_adler).is_err());
     }
+
+    /// Shader containers whose native programs are damaged: the container,
+    /// its XDAT index, the XBCH wrapper and the FSSM records with their
+    /// offsets and sizes. Each is refused or read; none panics.
+    #[test]
+    fn damaged_containers_never_panic() {
+        use crate::dxbc::{self, Container, FourCC};
+        let fssm = fssm(&[(HwStage::Vs, &VS_CODE), (HwStage::Ps, &PS_CODE)]);
+        let parts = [
+            part(&[(0x12, &[0; 16]), (KIND_NATIVE_RAW, &fssm)]),
+            part(&[(0x0a, b"xbop"), (KIND_NATIVE, &xbch(&fssm))]),
+        ];
+        let seeds: Vec<Vec<u8>> = parts
+            .iter()
+            .map(|p| dxbc::build(&[(FourCC::DXIL, p)]))
+            .collect();
+        // The container header and part table, the XDAT index, then the
+        // first records of the blob (its u64 offsets and sizes).
+        let data = 0x20 + 4 + 8;
+        let xdat = data + XDAT_OFFSET;
+        let mut fields = vec![0x18, 0x1C, 0x20, data - 4];
+        fields.extend((xdat..xdat + 48).step_by(4));
+        fields.extend((xdat + 48..xdat + 48 + 0x400).step_by(8));
+        victory_core::fuzz::run("shader container", 0x4458_4243, &seeds, &fields, |bytes| {
+            let Ok(c) = Container::parse(bytes) else {
+                return;
+            };
+            for p in &c.parts {
+                assert!(p.offset + 8 + p.data.len() <= bytes.len());
+                let _ = crate::DxilProgram::parse(p.data);
+                if let Ok(programs) = native_programs(p.data) {
+                    for program in programs {
+                        assert!(program.code.len() <= bytes.len().max(MAX_UNPACKED as usize));
+                        let _ = crate::gfx10::decode(&program.code);
+                    }
+                }
+            }
+        });
+    }
 }

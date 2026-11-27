@@ -631,4 +631,69 @@ mod tests {
             Err(PeError::Malformed(_))
         ));
     }
+
+    /// Damaged import libraries: archive headers with bad sizes, import
+    /// objects with bad string lengths and types. Refused or read, never a
+    /// panic.
+    #[test]
+    fn damaged_libraries_never_panic() {
+        let seeds = vec![archive(vec![
+            (
+                "k.dll/",
+                import_object(
+                    import_type::CODE,
+                    name_type::NAME,
+                    7,
+                    "ExitProcess",
+                    "k.dll",
+                    None,
+                ),
+            ),
+            (
+                "k.dll/",
+                import_object(import_type::DATA, name_type::ORDINAL, 5, "", "k.dll", None),
+            ),
+            (
+                "v.dll/",
+                import_object(
+                    import_type::CONST,
+                    name_type::NAME_EXPORTAS,
+                    0,
+                    "a",
+                    "v.dll",
+                    Some("b"),
+                ),
+            ),
+        ])];
+        // Each member's header (its size field at +48) and the import
+        // object's fields after it.
+        let mut fields = Vec::new();
+        let mut at = 8;
+        for _ in 0..3 {
+            fields.extend([
+                at,
+                at + 48,
+                at + 52,
+                at + 60,
+                at + 64,
+                at + 72,
+                at + 76,
+                at + 78,
+            ]);
+            let size: usize = std::str::from_utf8(&seeds[0][at + 48..at + 58])
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            at += 60 + size + size % 2;
+        }
+        victory_core::fuzz::run("import library", 0x004C_4942, &seeds, &fields, |data| {
+            if let Ok(lib) = ImportLibrary::parse(data) {
+                assert!(
+                    lib.imports.windows(2).all(|w| w[0] < w[1]),
+                    "sorted and deduplicated"
+                );
+            }
+        });
+    }
 }
