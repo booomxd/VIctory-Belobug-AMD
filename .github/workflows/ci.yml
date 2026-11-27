@@ -51,16 +51,47 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features --locked -- --test-threads=1
 
+  fmt-new-files:
+    name: Format of new files
+    # Most of the tree predates rustfmt here, and formatting it at once
+    # would conflict with every open pull request; so only the Rust files a
+    # pull request adds are held to rustfmt.toml. Edited files are not.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # The version and components pinned in rust-toolchain.toml.
+      - run: rustup toolchain install
+      - name: rustfmt --check the Rust files this pull request adds
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          base=$(git merge-base "origin/$BASE_REF" HEAD)
+          mapfile -t added < <(git diff --name-only --diff-filter=A "$base" HEAD -- '*.rs')
+          if [ ${#added[@]} -eq 0 ]; then
+            echo "This pull request adds no Rust files."
+            exit 0
+          fi
+          printf 'New: %s\n' "${added[@]}"
+          # Fix with: rustfmt --edition 2024 <file>
+          rustfmt --edition 2024 --check "${added[@]}"
+
   check:
-    needs: [clippy, test-default, test-diagnostics]
+    needs: [clippy, test-default, test-diagnostics, fmt-new-files]
     if: always()
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - name: Require all three jobs to pass
+      # (the format check runs on pull requests only: skipped on pushes)
+      - name: Require every job to pass
         run: |
           if ('${{ needs.clippy.result }}' -ne 'success' -or
               '${{ needs.test-default.result }}' -ne 'success' -or
-              '${{ needs.test-diagnostics.result }}' -ne 'success') {
+              '${{ needs.test-diagnostics.result }}' -ne 'success' -or
+              ('${{ needs.fmt-new-files.result }}' -notin @('success', 'skipped'))) {
             exit 1
           }
